@@ -111,11 +111,11 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                 args=[
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
+                  #  '--disable-dev-shm-usage',
                     '--disable-gpu',
                     '--disable-software-rasterizer',
-                    '--disable-extensions',
-                    '--disable-background-networking',
+                  #  '--disable-extensions',
+                  #  '--disable-background-networking',
                 ]
             )
             
@@ -124,7 +124,7 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                 ignore_https_errors=True,
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
                 # Block all popups and new windows
-                viewport={'width': 1280, 'height': 720}
+                viewport={'width': 720, 'height': 480}
             )
             
             page = await context.new_page()
@@ -204,7 +204,7 @@ async def sniff_urls(target_url: str, filter_type: str = None):
             await page.goto(target_url, wait_until="networkidle", timeout=30000)
             
             # Wait a bit for initial load
-            await asyncio.sleep(2)
+            await asyncio.sleep(5)
             
             # Click in center of screen to trigger any video interactions
             try:
@@ -213,7 +213,7 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                 center_y = viewport['height'] // 2
                 logger.info(f"Clicking center of screen at ({center_x}, {center_y})")
                 await page.mouse.click(center_x, center_y)
-                await asyncio.sleep(1)
+                await asyncio.sleep(5)
             except Exception as e:
                 logger.debug(f"Could not click center: {e}")
             
@@ -234,7 +234,7 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                     if element:
                         logger.info(f"Clicking element: {selector}")
                         await element.click()
-                        await asyncio.sleep(3)  # Wait for stream to start
+                        await asyncio.sleep(5)  # Wait for stream to start
                         break
                 except Exception as e:
                     logger.debug(f"Could not click {selector}: {e}")
@@ -247,7 +247,7 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                     await asyncio.wait_for(found_filtered_url.wait(), timeout=20)
                     logger.info(f"Found filtered URL early, stopping browser")
                 except asyncio.TimeoutError:
-                    logger.info(f"5 second timeout reached, checking collected URLs")
+                    logger.info(f"20 second timeout reached, checking collected URLs")
             else:
                 # For all URLs, wait the full 5 seconds
                 await asyncio.sleep(5)
@@ -260,11 +260,11 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                     # Wait briefly for any final streams to load
                     if filter_type:
                         try:
-                            await asyncio.wait_for(found_filtered_url.wait(), timeout=5)
+                            await asyncio.wait_for(found_filtered_url.wait(), timeout=10)
                         except asyncio.TimeoutError:
                             pass
                     else:
-                        await asyncio.sleep(2)
+                        await asyncio.sleep(5)
                 except Exception as e:
                     logger.debug(f"Could not perform final click: {e}")
             
