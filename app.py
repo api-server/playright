@@ -6,6 +6,7 @@ from playwright.async_api import async_playwright
 from urllib.parse import unquote, urlparse
 import logging
 import os
+import base64
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -166,8 +167,11 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                     filter_lower = filter_type.lower()
                     url_lower = url.lower()
                     
+                    # Check if filter matches in URL path or extension
                     if (f'.{filter_lower}' in url_lower or 
                         f'{filter_lower}?' in url_lower or
+                        f'/{filter_lower}/' in url_lower or
+                        url_lower.endswith(f'.{filter_lower}') or
                         url_lower.endswith(filter_lower)):
                         collected_urls.append(url)
                         logger.info(f"Found {filter_type}: {url}")
@@ -339,16 +343,29 @@ async def root():
     }
 
 
+@app.get("/favicon.ico")
+async def favicon():
+    """Return 204 for favicon requests"""
+    return JSONResponse(status_code=204, content=None)
+
+
 @app.get("/api/{url:path}")
 async def sniff_all_urls(url: str):
     """
     Sniff all URLs loaded by the target page
     Click play button to trigger streams
+    Supports base64-encoded URLs (if URL doesn't start with http:// or https://)
     """
-    # Don't decode - preserve # and ? in URL
-    # Only add https:// if not present
+    # Check if URL is base64 encoded (doesn't start with http)
     if not url.startswith(('http://', 'https://')):
-        decoded_url = 'https://' + url
+        try:
+            # Try to decode as base64
+            decoded_url = base64.b64decode(url).decode('utf-8')
+            logger.info(f"Decoded base64 URL: {decoded_url}")
+        except Exception as e:
+            # If decode fails, assume it's a plain URL without protocol
+            decoded_url = 'https://' + url
+            logger.info(f"Using URL with https:// prefix: {decoded_url}")
     else:
         decoded_url = url
     
@@ -384,11 +401,18 @@ async def sniff_filtered_urls(what: str, url: str):
     """
     Sniff specific type of URLs (e.g., m3u8, mpd)
     Returns only URLs matching the filter
+    Supports base64-encoded URLs (if URL doesn't start with http:// or https://)
     """
-    # Don't decode - preserve # and ? in URL
-    # Only add https:// if not present
+    # Check if URL is base64 encoded (doesn't start with http)
     if not url.startswith(('http://', 'https://')):
-        decoded_url = 'https://' + url
+        try:
+            # Try to decode as base64
+            decoded_url = base64.b64decode(url).decode('utf-8')
+            logger.info(f"Decoded base64 URL: {decoded_url}")
+        except Exception as e:
+            # If decode fails, assume it's a plain URL without protocol
+            decoded_url = 'https://' + url
+            logger.info(f"Using URL with https:// prefix: {decoded_url}")
     else:
         decoded_url = url
     
