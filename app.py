@@ -95,8 +95,10 @@ async def sniff_urls(target_url: str, filter_type: str = None):
     """
     Launch browser, navigate to URL, intercept requests, click to trigger streams
     Returns filtered URLs based on filter_type (m3u8, mpd, etc.)
+    For filtered requests, exits early when target URL is found
     """
     collected_urls = []
+    found_filtered_url = asyncio.Event()  # Signal when we find filtered URL
     
     async with async_playwright() as p:
         try:
@@ -123,27 +125,40 @@ async def sniff_urls(target_url: str, filter_type: str = None):
             page = await context.new_page()
             
             # Intercept all network requests
-            async def handle_request(request):
+            async def handle_route(route):
+                # Route object contains the request
+                request = route.request
                 url = request.url
                 
                 # Block ads and trackers
                 if is_ad_request(url):
                     logger.debug(f"Blocked ad: {url}")
-                    await request.abort()
+                    await route.abort()
                     return
                 
                 # Continue with non-ad requests
+                await route.continue_()
+                
+                # Collect URLs based on filter
                 if filter_type:
                     # Filter by specific type (e.g., m3u8, mpd)
-                    if filter_type.lower() in url.lower():
+                    # Match both extension (.m3u8) and query string (m3u8?)
+                    filter_lower = filter_type.lower()
+                    url_lower = url.lower()
+                    
+                    if (f'.{filter_lower}' in url_lower or 
+                        f'{filter_lower}?' in url_lower or
+                        url_lower.endswith(filter_lower)):
                         collected_urls.append(url)
                         logger.info(f"Found {filter_type}: {url}")
+                        # Signal that we found what we're looking for
+                        found_filtered_url.set()
                 else:
                     # Collect all URLs
                     collected_urls.append(url)
                     
             # Use route instead of on("request") to enable blocking
-            await page.route("**/*", handle_request)
+            await page.route("**/*", handle_route)
             
             # Block popups and overlays
             await page.add_init_script("""
@@ -201,16 +216,33 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                     logger.debug(f"Could not click {selector}: {e}")
                     continue
             
-            # Wait 5 seconds for streams to fully load
-            await asyncio.sleep(5)
+            # Wait 5 seconds for streams to fully load (or until we find filtered URL)
+            if filter_type:
+                # For filtered requests, wait max 5 seconds or until we find the URL
+                try:
+                    await asyncio.wait_for(found_filtered_url.wait(), timeout=20)
+                    logger.info(f"Found filtered URL early, stopping browser")
+                except asyncio.TimeoutError:
+                    logger.info(f"5 second timeout reached, checking collected URLs")
+            else:
+                # For all URLs, wait the full 5 seconds
+                await asyncio.sleep(5)
             
-            # Final click in center to ensure player is activated
-            try:
-                logger.info("Final center click to ensure player activation")
-                await page.mouse.click(center_x, center_y)
-                await asyncio.sleep(2)
-            except Exception as e:
-                logger.debug(f"Could not perform final click: {e}")
+            # Final click in center to ensure player is activated (only if not found yet)
+            if not filter_type or not found_filtered_url.is_set():
+                try:
+                    logger.info("Final center click to ensure player activation")
+                    await page.mouse.click(center_x, center_y)
+                    # Wait briefly for any final streams to load
+                    if filter_type:
+                        try:
+                            await asyncio.wait_for(found_filtered_url.wait(), timeout=5)
+                        except asyncio.TimeoutError:
+                            pass
+                    else:
+                        await asyncio.sleep(2)
+                except Exception as e:
+                    logger.debug(f"Could not perform final click: {e}")
             
             # Close browser
             await browser.close()
@@ -309,7 +341,7 @@ async def sniff_all_urls(url: str):
     
     # Wait for result
     try:
-        urls = await asyncio.wait_for(result_future, timeout=120)
+        urls = await asyncio.wait_for(result_future, timeout=60)
         return JSONResponse({
             "url": decoded_url,
             "total_urls": len(urls),
@@ -348,7 +380,7 @@ async def sniff_filtered_urls(what: str, url: str):
     
     # Wait for result
     try:
-        urls = await asyncio.wait_for(result_future, timeout=120)
+        urls = await asyncio.wait_for(result_future, timeout=60)
         return JSONResponse({
             "url": decoded_url,
             "filter": what,
