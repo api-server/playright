@@ -1,0 +1,247 @@
+import asyncio
+import time
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from playwright.async_api import async_playwright
+from urllib.parse import unquote
+import logging
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+app = FastAPI(title="Playwright URL Sniffer")
+
+# Queue for managing requests
+request_queue = asyncio.Queue()
+processing = False
+
+
+async def sniff_urls(target_url: str, filter_type: str = None):
+    """
+    Launch browser, navigate to URL, intercept requests, click to trigger streams
+    Returns filtered URLs based on filter_type (m3u8, mpd, etc.)
+    """
+    collected_urls = []
+    
+    async with async_playwright() as p:
+        try:
+            # Launch browser with minimal resources
+            browser = await p.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-software-rasterizer',
+                    '--disable-extensions',
+                    '--disable-background-networking',
+                ]
+            )
+            
+            # Create context with SSL error bypass
+            context = await browser.new_context(
+                ignore_https_errors=True,
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            
+            page = await context.new_page()
+            
+            # Intercept all network requests
+            async def handle_request(request):
+                url = request.url
+                if filter_type:
+                    # Filter by specific type (e.g., m3u8, mpd)
+                    if filter_type.lower() in url.lower():
+                        collected_urls.append(url)
+                        logger.info(f"Found {filter_type}: {url}")
+                else:
+                    # Collect all URLs
+                    collected_urls.append(url)
+                    
+            page.on("request", handle_request)
+            
+            # Navigate to target URL
+            logger.info(f"Navigating to: {target_url}")
+            await page.goto(target_url, wait_until="networkidle", timeout=30000)
+            
+            # Wait a bit for initial load
+            await asyncio.sleep(2)
+            
+            # Try to find and click play buttons to trigger streams
+            play_selectors = [
+                'button[class*="play"]',
+                'button[aria-label*="play" i]',
+                'div[class*="play"]',
+                '.play-button',
+                '[data-testid*="play"]',
+                'button.vjs-big-play-button',  # Video.js
+                'video',  # Direct video element
+            ]
+            
+            for selector in play_selectors:
+                try:
+                    element = await page.query_selector(selector)
+                    if element:
+                        logger.info(f"Clicking element: {selector}")
+                        await element.click()
+                        await asyncio.sleep(3)  # Wait for stream to start
+                        break
+                except Exception as e:
+                    logger.debug(f"Could not click {selector}: {e}")
+                    continue
+            
+            # Wait additional time for streams to load
+            await asyncio.sleep(5)
+            
+            # Close browser
+            await browser.close()
+            logger.info(f"Collected {len(collected_urls)} URLs")
+            
+            return collected_urls
+            
+        except Exception as e:
+            logger.error(f"Error during sniffing: {e}")
+            if 'browser' in locals():
+                await browser.close()
+            raise e
+
+
+async def process_queue():
+    """
+    Background task that processes requests from the queue one at a time
+    """
+    global processing
+    while True:
+        try:
+            # Get next request from queue
+            task = await request_queue.get()
+            processing = True
+            
+            url = task['url']
+            filter_type = task.get('filter_type')
+            result_future = task['result']
+            
+            try:
+                # Process the request
+                logger.info(f"Processing: {url} (filter: {filter_type})")
+                urls = await sniff_urls(url, filter_type)
+                result_future.set_result(urls)
+                
+            except Exception as e:
+                logger.error(f"Error processing request: {e}")
+                result_future.set_exception(e)
+            
+            finally:
+                request_queue.task_done()
+                processing = False
+                # Wait 2 seconds before processing next request
+                logger.info("Waiting 2 seconds before next request...")
+                await asyncio.sleep(2)
+                
+        except Exception as e:
+            logger.error(f"Queue processing error: {e}")
+            processing = False
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Start the background queue processor"""
+    asyncio.create_task(process_queue())
+    logger.info("Queue processor started")
+
+
+@app.get("/")
+async def root():
+    """Health check endpoint"""
+    return {
+        "status": "online",
+        "service": "Playwright URL Sniffer",
+        "queue_size": request_queue.qsize(),
+        "processing": processing
+    }
+
+
+@app.get("/api/{url:path}")
+async def sniff_all_urls(url: str):
+    """
+    Sniff all URLs loaded by the target page
+    Click play button to trigger streams
+    """
+    decoded_url = unquote(url)
+    
+    # Validate URL
+    if not decoded_url.startswith(('http://', 'https://')):
+        decoded_url = 'https://' + decoded_url
+    
+    # Create a future to hold the result
+    result_future = asyncio.Future()
+    
+    # Add to queue
+    await request_queue.put({
+        'url': decoded_url,
+        'filter_type': None,
+        'result': result_future
+    })
+    
+    queue_position = request_queue.qsize()
+    logger.info(f"Request queued. Position: {queue_position}")
+    
+    # Wait for result
+    try:
+        urls = await asyncio.wait_for(result_future, timeout=120)
+        return JSONResponse({
+            "url": decoded_url,
+            "total_urls": len(urls),
+            "urls": urls
+        })
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Request timeout")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/{url:path}/{what}")
+async def sniff_filtered_urls(url: str, what: str):
+    """
+    Sniff specific type of URLs (e.g., m3u8, mpd)
+    Returns only URLs matching the filter
+    """
+    decoded_url = unquote(url)
+    
+    # Validate URL
+    if not decoded_url.startswith(('http://', 'https://')):
+        decoded_url = 'https://' + decoded_url
+    
+    # Create a future to hold the result
+    result_future = asyncio.Future()
+    
+    # Add to queue
+    await request_queue.put({
+        'url': decoded_url,
+        'filter_type': what,
+        'result': result_future
+    })
+    
+    queue_position = request_queue.qsize()
+    logger.info(f"Request queued. Position: {queue_position}")
+    
+    # Wait for result
+    try:
+        urls = await asyncio.wait_for(result_future, timeout=120)
+        return JSONResponse({
+            "url": decoded_url,
+            "filter": what,
+            "total_urls": len(urls),
+            "urls": urls
+        })
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Request timeout")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

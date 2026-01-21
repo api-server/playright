@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: playwright-sniffer
+    env: docker
+    region: oregon
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /ms-playwright
