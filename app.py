@@ -96,8 +96,10 @@ async def sniff_urls(target_url: str, filter_type: str = None):
     Launch browser, navigate to URL, intercept requests, click to trigger streams
     Returns filtered URLs based on filter_type (m3u8, mpd, etc.)
     For filtered requests, exits early when target URL is found
+    Collects ALL URLs regardless of response status (200, 403, 404, etc.)
     """
     collected_urls = []
+    url_status_map = {}  # Track response status codes
     found_filtered_url = asyncio.Event()  # Signal when we find filtered URL
     
     async with async_playwright() as p:
@@ -116,13 +118,31 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                 ]
             )
             
-            # Create context with SSL error bypass
+            # Create context with SSL error bypass and popup blocking
             context = await browser.new_context(
                 ignore_https_errors=True,
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                # Block all popups and new windows
+                viewport={'width': 1280, 'height': 720}
             )
             
             page = await context.new_page()
+            
+            # Block popup windows and new tabs
+            context.on('page', lambda new_page: asyncio.create_task(new_page.close()))
+            
+            # Track response status codes
+            async def handle_response(response):
+                try:
+                    url = response.url
+                    status = response.status
+                    url_status_map[url] = status
+                    if status >= 400:
+                        logger.debug(f"Response {status}: {url}")
+                except Exception as e:
+                    logger.debug(f"Error tracking response: {e}")
+            
+            page.on('response', handle_response)
             
             # Intercept all network requests
             async def handle_route(route):
@@ -248,6 +268,11 @@ async def sniff_urls(target_url: str, filter_type: str = None):
             await browser.close()
             logger.info(f"Collected {len(collected_urls)} URLs")
             
+            # Log statistics about response codes
+            error_urls = {url: status for url, status in url_status_map.items() if status >= 400}
+            if error_urls:
+                logger.info(f"Found {len(error_urls)} URLs with error status codes")
+            
             return collected_urls
             
         except Exception as e:
@@ -320,11 +345,12 @@ async def sniff_all_urls(url: str):
     Sniff all URLs loaded by the target page
     Click play button to trigger streams
     """
-    decoded_url = unquote(url)
-    
-    # Validate URL
-    if not decoded_url.startswith(('http://', 'https://')):
-        decoded_url = 'https://' + decoded_url
+    # Don't decode - preserve # and ? in URL
+    # Only add https:// if not present
+    if not url.startswith(('http://', 'https://')):
+        decoded_url = 'https://' + url
+    else:
+        decoded_url = url
     
     # Create a future to hold the result
     result_future = asyncio.Future()
@@ -359,11 +385,12 @@ async def sniff_filtered_urls(what: str, url: str):
     Sniff specific type of URLs (e.g., m3u8, mpd)
     Returns only URLs matching the filter
     """
-    decoded_url = unquote(url)
-    
-    # Validate URL
-    if not decoded_url.startswith(('http://', 'https://')):
-        decoded_url = 'https://' + decoded_url
+    # Don't decode - preserve # and ? in URL
+    # Only add https:// if not present
+    if not url.startswith(('http://', 'https://')):
+        decoded_url = 'https://' + url
+    else:
+        decoded_url = url
     
     # Create a future to hold the result
     result_future = asyncio.Future()
