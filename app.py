@@ -357,17 +357,20 @@ async def sniff_all_urls(url: str):
     Supports base64-encoded URLs (if URL doesn't start with http:// or https://)
     """
     # Check if URL is base64 encoded (doesn't start with http)
-    if not url.startswith(('http://', 'https://')):
+    if url.startswith(('http://', 'https://')):
+        # Already a valid URL
+        decoded_url = url
+        logger.info(f"Using URL as-is: {decoded_url}")
+    else:
+        # Try to decode as base64
         try:
-            # Try to decode as base64
-            decoded_url = base64.b64decode(url).decode('utf-8')
+            decoded_bytes = base64.b64decode(url)
+            decoded_url = decoded_bytes.decode('utf-8')
             logger.info(f"Decoded base64 URL: {decoded_url}")
         except Exception as e:
             # If decode fails, assume it's a plain URL without protocol
+            logger.warning(f"Base64 decode failed ({e}), treating as plain URL")
             decoded_url = 'https://' + url
-            logger.info(f"Using URL with https:// prefix: {decoded_url}")
-    else:
-        decoded_url = url
     
     # Create a future to hold the result
     result_future = asyncio.Future()
@@ -404,17 +407,20 @@ async def sniff_filtered_urls(what: str, url: str):
     Supports base64-encoded URLs (if URL doesn't start with http:// or https://)
     """
     # Check if URL is base64 encoded (doesn't start with http)
-    if not url.startswith(('http://', 'https://')):
+    if url.startswith(('http://', 'https://')):
+        # Already a valid URL
+        decoded_url = url
+        logger.info(f"Using URL as-is: {decoded_url}")
+    else:
+        # Try to decode as base64
         try:
-            # Try to decode as base64
-            decoded_url = base64.b64decode(url).decode('utf-8')
+            decoded_bytes = base64.b64decode(url)
+            decoded_url = decoded_bytes.decode('utf-8')
             logger.info(f"Decoded base64 URL: {decoded_url}")
         except Exception as e:
             # If decode fails, assume it's a plain URL without protocol
+            logger.warning(f"Base64 decode failed ({e}), treating as plain URL")
             decoded_url = 'https://' + url
-            logger.info(f"Using URL with https:// prefix: {decoded_url}")
-    else:
-        decoded_url = url
     
     # Create a future to hold the result
     result_future = asyncio.Future()
