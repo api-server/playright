@@ -346,7 +346,8 @@ async def root():
 @app.get("/favicon.ico")
 async def favicon():
     """Return 204 for favicon requests"""
-    return JSONResponse(status_code=204, content=None)
+    from fastapi.responses import Response
+    return Response(status_code=204)
 
 
 @app.get("/api/{url:path}")
