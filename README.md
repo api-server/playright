@@ -43,12 +43,12 @@ GET /api/https://example.com/video-page
 }
 ```
 
-### `GET /api/{url}/{filter}`
+### `GET /{filter}/{url}`
 Sniff and return only URLs matching the specified filter (e.g., m3u8, mpd, ts).
 
 **Example:**
 ```
-GET /api/https://example.com/video-page/m3u8
+GET /m3u8/https://example.com/video-page
 ```
 
 **Response:**
@@ -86,7 +86,7 @@ uvicorn app:app --host 0.0.0.0 --port 8000
 ```bash
 curl http://localhost:8000/
 curl http://localhost:8000/api/https://example.com
-curl http://localhost:8000/api/https://example.com/m3u8
+curl http://localhost:8000/m3u8/https://example.com
 ```
 
 ## Docker Deployment

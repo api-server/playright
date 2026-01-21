@@ -3,14 +3,88 @@ import time
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from playwright.async_api import async_playwright
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 import logging
+import os
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Playwright URL Sniffer")
+
+# Global set for ad domains (loaded from blockads.txt)
+AD_DOMAINS = set()
+
+
+def load_ad_blocklist():
+    """
+    Load ad domains from blockads.txt file
+    Parses EasyList format: ||domain.com^ or ||domain.com^$options
+    Handles both domains and IP addresses
+    """
+    global AD_DOMAINS
+    blocklist_path = os.path.join(os.path.dirname(__file__), 'blockads.txt')
+    
+    if not os.path.exists(blocklist_path):
+        logger.warning(f"blockads.txt not found at {blocklist_path}, ad blocking disabled")
+        return
+    
+    try:
+        with open(blocklist_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                # Skip comments and empty lines
+                if not line or line.startswith('!'):
+                    continue
+                
+                # Parse ||domain.com^ or ||domain.com^$options format
+                if line.startswith('||') and '^' in line:
+                    # Extract domain/IP between || and ^
+                    domain = line[2:line.index('^')]
+                    # Remove any options after ^ (e.g., $third-party)
+                    domain = domain.split('$')[0].strip()
+                    AD_DOMAINS.add(domain.lower())
+        
+        logger.info(f"Loaded {len(AD_DOMAINS)} ad domains from blocklist")
+    except Exception as e:
+        logger.error(f"Error loading blocklist: {e}")
+
+
+def is_ad_request(url: str) -> bool:
+    """
+    Check if URL is from an ad network or blocked IP
+    Uses efficient set lookup for fast performance
+    Handles both domains and IP addresses
+    """
+    if not AD_DOMAINS:
+        return False
+    
+    try:
+        # Extract domain/IP from URL
+        parsed = urlparse(url)
+        netloc = parsed.netloc.lower()
+        
+        # Remove port if present (e.g., domain.com:8080 -> domain.com)
+        if ':' in netloc:
+            netloc = netloc.split(':')[0]
+        
+        # Direct match (works for both domains and IPs)
+        if netloc in AD_DOMAINS:
+            return True
+        
+        # Check subdomain matches (e.g., ads.example.com matches example.com)
+        # Skip for IP addresses (they don't have subdomains)
+        if not netloc.replace('.', '').replace(':', '').isdigit():  # Not an IP
+            parts = netloc.split('.')
+            for i in range(len(parts)):
+                subdomain = '.'.join(parts[i:])
+                if subdomain in AD_DOMAINS:
+                    return True
+        
+        return False
+    except:
+        return False
 
 # Queue for managing requests
 request_queue = asyncio.Queue()
@@ -51,6 +125,14 @@ async def sniff_urls(target_url: str, filter_type: str = None):
             # Intercept all network requests
             async def handle_request(request):
                 url = request.url
+                
+                # Block ads and trackers
+                if is_ad_request(url):
+                    logger.debug(f"Blocked ad: {url}")
+                    await request.abort()
+                    return
+                
+                # Continue with non-ad requests
                 if filter_type:
                     # Filter by specific type (e.g., m3u8, mpd)
                     if filter_type.lower() in url.lower():
@@ -60,7 +142,23 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                     # Collect all URLs
                     collected_urls.append(url)
                     
-            page.on("request", handle_request)
+            # Use route instead of on("request") to enable blocking
+            await page.route("**/*", handle_request)
+            
+            # Block popups and overlays
+            await page.add_init_script("""
+                // Block popup overlays
+                window.addEventListener('DOMContentLoaded', () => {
+                    const styles = document.createElement('style');
+                    styles.textContent = `
+                        [class*="modal"], [class*="popup"], [class*="overlay"],
+                        [id*="modal"], [id*="popup"], [id*="overlay"] {
+                            display: none !important;
+                        }
+                    `;
+                    document.head.appendChild(styles);
+                });
+            """)
             
             # Navigate to target URL
             logger.info(f"Navigating to: {target_url}")
@@ -68,6 +166,17 @@ async def sniff_urls(target_url: str, filter_type: str = None):
             
             # Wait a bit for initial load
             await asyncio.sleep(2)
+            
+            # Click in center of screen to trigger any video interactions
+            try:
+                viewport = page.viewport_size
+                center_x = viewport['width'] // 2
+                center_y = viewport['height'] // 2
+                logger.info(f"Clicking center of screen at ({center_x}, {center_y})")
+                await page.mouse.click(center_x, center_y)
+                await asyncio.sleep(1)
+            except Exception as e:
+                logger.debug(f"Could not click center: {e}")
             
             # Try to find and click play buttons to trigger streams
             play_selectors = [
@@ -92,8 +201,16 @@ async def sniff_urls(target_url: str, filter_type: str = None):
                     logger.debug(f"Could not click {selector}: {e}")
                     continue
             
-            # Wait additional time for streams to load
+            # Wait 5 seconds for streams to fully load
             await asyncio.sleep(5)
+            
+            # Final click in center to ensure player is activated
+            try:
+                logger.info("Final center click to ensure player activation")
+                await page.mouse.click(center_x, center_y)
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.debug(f"Could not perform final click: {e}")
             
             # Close browser
             await browser.close()
@@ -147,7 +264,8 @@ async def process_queue():
 
 @app.on_event("startup")
 async def startup_event():
-    """Start the background queue processor"""
+    """Start the background queue processor and load ad blocklist"""
+    load_ad_blocklist()
     asyncio.create_task(process_queue())
     logger.info("Queue processor started")
 
@@ -159,7 +277,8 @@ async def root():
         "status": "online",
         "service": "Playwright URL Sniffer",
         "queue_size": request_queue.qsize(),
-        "processing": processing
+        "processing": processing,
+        "ad_domains_loaded": len(AD_DOMAINS)
     }
 
 
@@ -202,8 +321,8 @@ async def sniff_all_urls(url: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/{url:path}/{what}")
-async def sniff_filtered_urls(url: str, what: str):
+@app.get("/{what}/{url:path}")
+async def sniff_filtered_urls(what: str, url: str):
     """
     Sniff specific type of URLs (e.g., m3u8, mpd)
     Returns only URLs matching the filter
